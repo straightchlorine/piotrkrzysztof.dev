@@ -1,0 +1,36 @@
+steps:
+  - name: build-check
+    image: node:22-alpine
+    commands:
+      - corepack enable
+      - pnpm install --frozen-lockfile
+      - pnpm build
+    when:
+      - event: push
+        branch:
+          exclude: main
+
+  - name: deploy-preview
+    image: node:22-alpine
+    commands:
+      - corepack enable
+      - npx vercel pull --yes --environment=preview --token=$VERCEL_TOKEN
+      - npx vercel build --token=$VERCEL_TOKEN
+      - npx vercel deploy --prebuilt --token=$VERCEL_TOKEN
+    secrets: [vercel_token, vercel_org_id, vercel_project_id]
+    when:
+      - event: push
+        branch:
+          exclude: main
+
+  - name: deploy-production
+    image: node:22-alpine
+    commands:
+      - corepack enable
+      - npx vercel pull --yes --environment=production --token=$VERCEL_TOKEN
+      - npx vercel build --prod --token=$VERCEL_TOKEN
+      - npx vercel deploy --prebuilt --prod --token=$VERCEL_TOKEN
+    secrets: [vercel_token, vercel_org_id, vercel_project_id]
+    when:
+      - event: push
+        branch: main

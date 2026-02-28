@@ -1,0 +1,216 @@
+---
+title: "Arch: Fixing mdadm RAID5 config post update"
+date: 2026-02-28
+description: "Procedure and steps for fixing RAID5 on startup."
+---
+
+This morning I was welcomed with an issue:
+
+```bash
+/usr/bin/fsck.xfs: XFS file system.
+[ TIME ] Timed out waiting for device /dev/disk/by-uuid/e84be969... .
+[DEPEND] Dependency failed for File System Check on /dev/disk/by-uuid/e84be969... .
+[DEPEND] Dependency failed for /data/vault.
+[DEPEND] Dependency failed for Local File Systems.
+You are in emergency mode. After loggin in type "journalctl -xb" to view
+system logs, "systemctl reboot" to reboot, or "exit"
+to continue bootup.
+```
+
+For context - `/data/vault` is a mount point for `mdadm` RAID5 configuration. It was my first time
+being faced with probable RAID failure. At first I even considered a broken drive, which was not
+the case.
+
+### Solution
+
+<TLDR>
+
+```bash
+# add to your /etc/fstab nofail flag
+# (optional step to boot to your system)
+UUID=<uuid> <path> <fs>  rw,nofail,noatime <dump> <fsck>
+                            ^----^
+# ensure your system is up to date
+$ sudo pacman -Syu
+
+# ensure file /etc/mdadm.conf exists
+$ cat /etc/mdadm.conf
+
+# if it doesn't
+# assemble your raid (adjust the command according to your array)
+$ sudo mdadm --assemble /dev/md/raid5array /dev/sda1 /dev/sdb1 /dev/sdc1
+
+# and generate the /etc/mdadm.conf file
+$ sudo mdadm --detail --scan | sudo tee /etc/mdadm.conf
+
+# in case any of the commands above fail
+# ensure you have kernel modules loaded
+$ sudo modprobe raid456
+
+# along with that ensure your
+# /etc/mkinitcpio.conf
+# has mdadm_udev attached to the hooks
+$ grep HOOKS /etc/mkinitcpio.conf
+HOOKS=(base udev <...> block mdadm_udev lvm2 filesystems fsck)
+                             ^--------^
+
+# then regenerate mkinitcpio
+$ sudo mkinitcpio -P
+
+# after that - attempt those same commands again i.e.
+$ sudo mdadm --assemble /dev/md/raid5array /dev/sda1 /dev/sdb1 /dev/sdc1
+$ sudo mdadm --detail --scan | sudo tee /etc/mdadm.conf
+
+# at this point - problem should be fixed
+# try to reboot; in case of any problems it might be a good idea to run
+$ sudo pacman -Syu
+
+#### auxiliary commands ####
+# in case modprobe fails
+# if it fails - check whether modules exist in your kernel at all
+$ find /lib/modules/$(uname -r) -name "raid456*"
+$ ls -al /sys/module/md_mod
+
+# this should be packed along with your kernel
+# if you don't have it:
+# - ensure your kernel is up to date;
+# - ensure your mdadm is up to date
+$ pacman -Qo /lib/modules/$(uname -r)/kernel/drivers/md/raid456.ko.zst
+/usr/lib/modules/.../raid456.ko.zst is owned by linux-zen 6.18.13.zen1-1
+$ pacman -Syu mdadm
+
+# and try updating
+$ pacman -Syu
+```
+
+</TLDR>
+
+To investigate, I wanted to actually boot, so I typed in my `root` password and
+after a few tries I was logged in. There I added `nofail` to the flags in `/etc/fstab` for the RAID mount
+and rebooted.
+
+After that I tried `lsblk`:
+
+```bash
+NAME            FSTYPE            FSVER    LABEL                       UUID
+sda
+└─sda1          linux_raid_member 1.2      research-station:raid5array 893ea1a0...
+sdb
+└─sdb1          linux_raid_member 1.2      research-station:raid5array 893ea1a0...
+sdc
+└─sdc1          linux_raid_member 1.2      research-station:raid5array 893ea1a0...
+```
+
+The UUID still didn't match the one in the logs. Then I tried debugging my RAID config, since it's likely
+that it isn't assembled at all (`blkid` also didn't return the UUID from the bootscreen).
+
+```bash
+$ sudo mdadm --detail /dev/sda1
+mdadm: /dev/sda1 does not appear to be an md device
+```
+
+Then I took advice from the bootscreen and checked `journalctl -b -q | grep -iE "timeout|raid"`
+
+```bash
+Feb 28 09:14:24 research-station kernel: raid6: skipped pq benchmark and selected avx2x4
+Feb 28 09:14:24 research-station kernel: raid6: using avx2x2 recovery algorithm
+Feb 28 09:14:24 research-station systemd[1]: Expecting device /dev/disk/by-uuid/e84be969...
+Feb 28 09:15:54 research-station systemd[1]: dev-disk-by\x2duuid-e84be969....device: Job dev-disk-by\x2duuid-e84be969....device/start timed out.
+```
+(*Quick note - even though I have RAID5 set up - `raid6` is displayed in the journal, because
+RAID 4, 5, 6 are handled by a single kernel module `raid456`. RAID5 shares
+quite a bit of codebase with RAID6 - the fifth version includes extra [parity calculation](https://www.sqlpassion.at/archive/2017/05/08/how-to-calculate-raid-5-parity-information/).*)
+
+So from the logs - the system was waiting for the drive, but didn't receive a response! Remembering that
+a system update was done the day before:
+
+```bash
+$ grep -E "upgraded|installed" /var/log/pacman.log | tail -100
+...
+[2026-02-27T16:08:56+0100] [ALPM] upgraded mdadm (4.4-2 -> 4.5-1)
+...
+```
+
+So I have taken the case to Claude. Suggestion was to check the `/etc/mdadm.conf` - which
+was empty - and I had no recollection of creating such file. So I set out to create this file, being
+aided by the instructions.
+
+```bash
+$ sudo mdadm --detail --scan | sudo tee /etc/mdadm.conf
+
+```
+
+Empty output - that means that it really wasn't assembled, so trying to do that:
+
+```bash
+$ sudo mdadm --assemble /dev/md/raid5array /dev/sda1 /dev/sdb1 /dev/sdc1
+mdadm: Can't open /sys/module/md_mod/parameters/legacy_async_del_gendisk
+mdadm: init md module parameters fail
+```
+
+The second line of output seems like the module isn't loaded, so to load it:
+
+```bash
+$ sudo modprobe raid456
+```
+
+And, since udev rules apparently changed, it was also good to visit `/etc/mkinitcpio.conf`,
+since I was not careful with the update. As it turned out `mdadm_udev` was also lacking.
+
+After updating hooks to:
+
+```bash
+HOOKS=(base udev autodetect microcode modconf kms keyboard keymap consolefont block mdadm_udev lvm2 filesystems fsck)
+```
+
+and running `sudo mkinitcpio -P`, I attempted the previous commands again:
+
+```bash
+$ sudo mdadm --assemble /dev/md/raid5array /dev/sda1 /dev/sdb1 /dev/sdc1
+mdadm: /dev/md/raid5array has been started with 3 drives.
+$ sudo mdadm --detail --scan | sudo tee /etc/mdadm.conf
+ARRAY /dev/md/raid5array metadata=1.2 UUID=893ea1a0...
+$ cat /etc/mdadm.conf
+ARRAY /dev/md/raid5array metadata=1.2 UUID=893ea1a0...
+```
+
+After one more update - which included another patch to `mdadm` and a reboot, everything was fine!
+
+```bash
+sda               8:0    0   1.8T  0 disk
+└─sda1            8:1    0   1.8T  0 part
+  └─md127         9:127  0   3.6T  0 raid5 /data/vault
+sdb               8:16   0   1.8T  0 disk
+└─sdb1            8:17   0   1.8T  0 part
+  └─md127         9:127  0   3.6T  0 raid5 /data/vault
+sdc               8:32   0   1.8T  0 disk
+└─sdc1            8:33   0   1.8T  0 part
+  └─md127         9:127  0   3.6T  0 raid5 /data/vault
+```
+
+The origin of this problem traces to this [commit](https://git.kernel.org/pub/scm/utils/mdadm/mdadm.git/commit/?h=mdadm-4.5&id=d354d314db86379f18a4ccd35af9f6e56635b61d).
+
+### Overview of the problem
+
+A kernel patch changed how `/dev/mdX` device nodes are removed when you run
+`mdadm --stop`. It reads:
+
+`kernel patch 9e59d609763f ('md: call del_gendisk in control path') calls
+del_gendisk in sync way.`
+
+And it used to be async.
+
+On the system with kernel `6.18+`, which uses sync deletion - old assembly fails. Thus
+a compatibility parameter was added called `legacy_async_del_gendisk`. This parameter
+keeps the async behaviour for older systems.
+
+In my case - access to `/sys/module/md_mod/*` was attempted, but `md_mod` wasn't
+loaded yet, so:
+
+1. `open()` fails;
+2. `set_md_mod_parameter` returns false;
+3. `init_md_mod_param` also returns false.
+
+That causes errors during the `mdadm --assemble` command.
+
+S.D.G

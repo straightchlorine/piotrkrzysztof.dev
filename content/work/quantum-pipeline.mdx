@@ -1,0 +1,53 @@
+---
+title: "Quantum Pipeline"
+description: "Framework for running quantum algorithms."
+---
+
+## Context
+
+Since I started my engineering degree, quantum computing has been one of my interests.
+To pursue this - I started building something that combined study with a modern tech
+stack - a project that could be a subject of an engineering thesis and serve as a portfolio piece.
+
+## Approach
+
+### Simulation
+
+The starting point was a simulation module for the Variational Quantum Eigensolver (VQE).
+It seemed appropriate for study: both classical and quantum components, controlled
+experiments and possibility to utilise IBM Quantum Experience free credits.
+
+### GPU acceleration
+
+Next came CUDA-based GPU acceleration through Qiskit Aer, which had already been tested
+at that stage. Getting the GPU Docker image running on a dedicated instance proved more
+challenging than expected - NVIDIA drivers, and some compatibility issues with the
+precompiled version of Aer from pip.
+
+Having a separate machine for Aer's compilation and testing made a difference.
+In case something didn't go as planned - it was a problem for another day.
+
+### Integration with Kafka
+
+A simulation module on its own is interesting but not particularly useful. The data it produces
+should be somehow forwarded to storage and some sort of analytics. Apache Kafka and Spark were
+a natural fit - something worth learning independently of this project.
+
+The remaining work leaned more toward infrastructure: connecting things together so the data
+the simulation produces can be utilised. The specific challenges there might warrant
+separate articles.
+
+## Outcome
+
+After a long break spent writing the thesis, development resumed. Alongside a master's degree,
+the aim is to bring it closer to a proper *end-to-end* system.
+
+Recent work focused on increasing test coverage, writing documentation, addressing
+problems in the simulation module that the thesis revealed, and cleaning up the
+CI/CD pipeline - making it more reliable and less redundant.
+
+[GitHub](https://github.com/straightchlorine/quantum-pipeline) &middot;
+[Codeberg (mirror)](https://codeberg.org/piotrkrzysztof/quantum-pipeline) &middot;
+[Documentation](https://docs.qp.piotrkrzysztof.dev/)
+
+S.D.G

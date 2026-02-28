@@ -1,3 +1,6 @@
+when:
+  - event: push
+
 steps:
   - name: build-check
     image: node:22-alpine
@@ -6,8 +9,7 @@ steps:
       - pnpm install --frozen-lockfile
       - pnpm build
     when:
-      - event: push
-        branch:
+      - branch:
           exclude: main
 
   - name: deploy-preview
@@ -25,8 +27,7 @@ steps:
       VERCEL_PROJECT_ID:
         from_secret: vercel_project_id
     when:
-      - event: push
-        branch:
+      - branch:
           exclude: main
 
   - name: deploy-production
@@ -44,5 +45,4 @@ steps:
       VERCEL_PROJECT_ID:
         from_secret: vercel_project_id
     when:
-      - event: push
-        branch: main
+      - branch: main

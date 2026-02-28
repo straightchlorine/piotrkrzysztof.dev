@@ -17,7 +17,13 @@ steps:
       - npx vercel pull --yes --environment=preview --token=$VERCEL_TOKEN
       - npx vercel build --token=$VERCEL_TOKEN
       - npx vercel deploy --prebuilt --token=$VERCEL_TOKEN
-    secrets: [vercel_token, vercel_org_id, vercel_project_id]
+    environment:
+      VERCEL_TOKEN:
+        from_secret: vercel_token
+      VERCEL_ORG_ID:
+        from_secret: vercel_org_id
+      VERCEL_PROJECT_ID:
+        from_secret: vercel_project_id
     when:
       - event: push
         branch:
@@ -30,7 +36,13 @@ steps:
       - npx vercel pull --yes --environment=production --token=$VERCEL_TOKEN
       - npx vercel build --prod --token=$VERCEL_TOKEN
       - npx vercel deploy --prebuilt --prod --token=$VERCEL_TOKEN
-    secrets: [vercel_token, vercel_org_id, vercel_project_id]
+    environment:
+      VERCEL_TOKEN:
+        from_secret: vercel_token
+      VERCEL_ORG_ID:
+        from_secret: vercel_org_id
+      VERCEL_PROJECT_ID:
+        from_secret: vercel_project_id
     when:
       - event: push
         branch: main

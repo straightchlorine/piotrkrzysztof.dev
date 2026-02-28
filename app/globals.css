@@ -1,0 +1,10 @@
+@import "tailwindcss";
+@import "katex/dist/katex.min.css";
+
+@theme {
+  --color-parchment: #f5f0e8;
+  --color-brown: #3d2e1e;
+  --color-brown-muted: #8a7a6a;
+  --color-brown-link: #9a8565;
+  --color-divider: #d4c9b8;
+}

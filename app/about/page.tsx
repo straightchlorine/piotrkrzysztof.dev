@@ -30,7 +30,7 @@ export default function About() {
       </div>
       <p className="mt-12 text-brown-muted">
         <a
-          href="https://github.com/piotrkrzysztof"
+          href="https://github.com/straightchlorine"
           className="hover:text-brown transition-colors"
           rel="noopener noreferrer"
           target="_blank"

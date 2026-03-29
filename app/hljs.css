@@ -1,0 +1,28 @@
+/* Syntax highlighting — token colors only, no background overrides */
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-name { color: #7a5230; font-weight: 600; }
+
+.hljs-built_in { color: #7a5230; }
+
+.hljs-string,
+.hljs-attr { color: #6a7a3a; }
+
+.hljs-number,
+.hljs-literal { color: #8b5e3c; }
+
+.hljs-comment,
+.hljs-quote { color: #9a8a7a; font-style: italic; }
+
+.hljs-title { color: #4a6a3a; }
+
+.hljs-params { color: #6b5340; font-style: italic; }
+
+.hljs-type,
+.hljs-class .hljs-title { color: #6b5340; }
+
+.hljs-meta,
+.hljs-decorator { color: #8a7a6a; }
+
+.hljs-variable,
+.hljs-template-variable { color: #5a4a3a; }

@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { cormorant } from "@/lib/fonts";
 import { Footer } from "@/components/footer";
 import "katex/dist/katex.min.css";
+import "./hljs.css";
 import "./globals.css";
 
 export const metadata: Metadata = {

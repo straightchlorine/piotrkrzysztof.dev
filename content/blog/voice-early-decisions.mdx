@@ -1,0 +1,57 @@
+---
+title: "Taking over a voice agent project"
+date: 2026-03-05
+description: "SQLite vs PostgreSQL, dependency conflicts, and splitting services. Early decisions on a client project."
+---
+
+I had taken over a project for a client, who wanted a voice agent in his
+application - as additional aid to the typical chat interface.
+
+The application at that point consisted of a couple of agents
+(`OpenAI Agents SDK`). One agent led the conversation (text-only),
+while the other analysed users' input and via tool calls updated the
+frontend. It kept track of what was already discussed and what was left
+for the user to clarify.
+
+Agents were using SQLite for session storage. It was completely sufficient
+for a fairly long period of time. However, due to client's requirements
+and feature requests, as well as a hope that the cooperation would grow,
+I reimplemented those in PostgreSQL. In hindsight - I should've just stuck
+with SQLite, mounted and secured the volume properly. Would've saved
+some time.
+
+---
+
+Starting off the work - I set up a split into production and development
+instances, mainly to allow our team to preview changes before rolling them
+out for the client. Trunk based development would've been completely
+fine for this kind of project.
+
+Having a development instance was helpful at times though - application
+didn't have a significant test coverage and client requirements weren't
+that clear then.
+
+---
+
+At the time (August 2025) there was a dependency conflict between Pipecat and the
+OpenAI Agents SDK. Agent session storage required `openai-agents>=0.2.0`,
+which in turn needed `openai>=1.93.1`. Pipecat `0.0.76` used
+`openai~=1.74.0` - meaning `>=1.74.0, <1.75.0`. The two couldn't
+coexist in the same environment.
+
+Pace of delivery was important. I pulled the pipecat code into a separate
+container and service.
+
+I liked the architecture in theory - the backend could potentially serve
+our other applications as well. In practice, it introduced complexity
+that wasn't justified yet: a more involved `.gitlab-ci` and
+`docker-compose.yaml`, when a single service would've been enough at
+that stage.
+
+Within days of committing to the split, Pipecat `0.0.77` came out and
+loosened the constraint to `openai>=1.74.0, <2` - which would have
+allowed both packages to coexist. Wiser to just wait. I bumped
+to `0.0.79` with `[daily,cartesia,deepgram,silero,azure,runner]` extras
+in the separate backend regardless.
+
+S.D.G

@@ -1,0 +1,142 @@
+---
+title: "Pipecat: Getting interruptions to work"
+date: 2026-03-15
+description: "Implementing MVP with clean interruption handling in Pipecat 0.0.79."
+---
+
+A [client project](/blog/voice-early-decisions) with a voice agent
+built on Pipecat, Deepgram STT, Cartesia TTS, and OpenAI for the LLM.
+The agent needed to handle interruptions - stop talking when the user speaks.
+
+### Starting over
+
+My initial attempt was overengineered. Custom VAD parameters, an Azure OpenAI
+client setup, a custom LLM service subclass, and RTVI components that
+weren't doing anything:
+
+```python
+# ...
+vad_analyzer=SileroVADAnalyzer(
+    params=VADParams(
+        stop_secs=0.5,
+        start_secs=0.1,
+        min_volume=0.4,
+    )
+),
+
+# ...
+
+azure_client = AsyncOpenAI(
+    api_key=os.getenv("AZURE_OPENAI_API_KEY"),
+    base_url=f"{os.getenv('AZURE_OPENAI_ENDPOINT')}/openai/deployments/...",
+    default_query={"api-version": "2024-10-21"},
+)
+
+# ...
+
+from pipecat.processors.frameworks.rtvi import RTVIConfig, RTVIObserver, RTVIProcessor
+rtvi = RTVIProcessor(config=RTVIConfig(config=[]))
+task = PipelineTask(pipeline, params=..., observers=[RTVIObserver(rtvi)])
+
+# ...
+
+class CustomLLMService(OpenAILLMService):
+    def __init__(self, agent, backend_client):
+        super().__init__(...)
+        self.agent = agent
+# ...
+```
+
+I went back to Pipecat's examples and built a minimal bot following
+the `run_bot()` pattern:
+
+```python
+async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
+    session_id = os.getenv("BOT_SESSION_ID", "default")
+
+    stt = DeepgramSTTService(api_key=os.getenv("DEEPGRAM_API_KEY"))
+
+    tts = CartesiaHttpTTSService(
+        api_key=os.getenv("CARTESIA_API_KEY"),
+        voice_id=os.getenv("CARTESIA_VOICE_ID", "..."),
+    )
+
+    llm = OpenAILLMService(api_key=os.getenv("OPENAI_API_KEY"))
+
+    pipeline = Pipeline([
+        transport.input(),
+        stt,
+        context_aggregator.user(),
+        llm,
+        tts,
+        transport.output(),
+        context_aggregator.assistant(),
+    ])
+```
+
+### Interruptions
+
+I used Pipecat's built-in `MinWordsInterruptionStrategy`, `StartInterruptionFrame`
+and `StopInterruptionFrame`.
+
+An issue appeared: database writes were cancelled on interruption. The agent
+was calling tool functions to update the frontend, and those were being
+killed mid-write. Fix was `cancel_on_interruption=False`:
+
+```python
+from pipecat.audio.interruptions.min_words_interruption_strategy import (
+    MinWordsInterruptionStrategy,
+)
+from pipecat.frames.frames import (
+    StartInterruptionFrame,
+    StopInterruptionFrame,
+)
+
+llm.register_function(
+    "update_item",
+    function_handler.update_item,
+    cancel_on_interruption=False,
+)
+llm.register_function(
+    "complete_item",
+    function_handler.complete_item,
+    cancel_on_interruption=False,
+)
+```
+
+Still didn't work. I removed the custom VAD parameters in favour of
+Pipecat's defaults, which didn't help either:
+
+```python
+vad_analyzer=SileroVADAnalyzer(),
+```
+
+### The actual problem
+
+Turns out the issue was Cartesia's TTS service. Pipecat has two variants:
+`CartesiaTTSService` (WebSocket, streams audio progressively) and
+`CartesiaHttpTTSService` (HTTP, returns complete audio chunks). The streaming
+variant doesn't allow for clean interruptions - audio frames are already
+in flight. The HTTP variant sends complete chunks that can be discarded:
+
+```python
+from pipecat.services.cartesia.tts import CartesiaTTSService, CartesiaHttpTTSService
+tts = CartesiaHttpTTSService(
+    api_key=os.getenv("CARTESIA_API_KEY"),
+    voice_id=os.getenv("CARTESIA_VOICE_ID", "..."),
+)
+```
+
+After switching to the HTTP variant and dropping the unused
+[RTVI](https://docs.rtvi.ai/) components (Daily transport and
+`@pipecat-ai/client-js` were used directly), I had a working MVP
+with clean interruptions.
+
+---
+
+This dates back to August 2025. Pipecat has since matured and the approach
+described here is being deprecated in favour of
+[user turn strategies](https://docs.pipecat.ai/server/utilities/turn-management/user-turn-strategies).
+Documentation is significantly better now as well.
+
+S.D.G

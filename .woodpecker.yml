@@ -10,7 +10,7 @@ steps:
       - pnpm build
     when:
       - branch:
-          exclude: main
+          exclude: master
 
   - name: deploy-preview
     image: node:22-alpine
@@ -28,7 +28,7 @@ steps:
         from_secret: vercel_project_id
     when:
       - branch:
-          exclude: main
+          exclude: master
 
   - name: deploy-production
     image: node:22-alpine
@@ -45,4 +45,4 @@ steps:
       VERCEL_PROJECT_ID:
         from_secret: vercel_project_id
     when:
-      - branch: main
+      - branch: master

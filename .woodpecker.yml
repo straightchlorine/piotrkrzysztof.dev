@@ -2,15 +2,16 @@ when:
   - event: push
 
 steps:
-  - name: build-check
+  # Gate: runs on every branch (incl. master). Woodpecker runs steps
+  # sequentially, so a failure here stops the pipeline before any deploy.
+  - name: check
     image: node:22-alpine
     commands:
       - corepack enable
       - pnpm install --frozen-lockfile
+      - pnpm exec tsc --noEmit
+      - pnpm lint
       - pnpm build
-    when:
-      - branch:
-          exclude: master
 
   - name: deploy-preview
     image: node:22-alpine

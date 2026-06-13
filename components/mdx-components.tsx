@@ -22,7 +22,9 @@ export const mdxComponents: MDXComponents = {
   h3: (props) => (
     <h3 className="text-xl font-semibold mt-8 mb-2 text-brown" {...props} />
   ),
-  p: (props) => <p className="mb-5 leading-[1.7]" {...props} />,
+  p: (props) => (
+    <p className="mb-5 leading-[1.7] text-justify hyphens-auto" {...props} />
+  ),
   a: (props) => (
     <a className="text-brown-link underline decoration-brown-link/30 hover:decoration-brown-link transition-colors" {...props} />
   ),
@@ -31,11 +33,43 @@ export const mdxComponents: MDXComponents = {
   blockquote: (props) => (
     <blockquote className="border-l-2 border-divider pl-5 italic text-brown-muted mb-5" {...props} />
   ),
-  code: (props) => (
-    <code className="bg-divider/40 px-1.5 py-0.5 rounded text-[0.72em]" {...props} />
-  ),
+  code: ({ className, children, ...props }) => {
+    // Block code (fenced) is rendered inside <pre>: it carries an hljs/
+    // language- class from the highlighter, or - for plain blocks like the
+    // log dumps and ASCII diagrams - spans multiple lines. Those must NOT get
+    // the inline "pill" styling, or the inline background paints ragged
+    // per-line boxes and breaks alignment. <pre> owns the block background.
+    const text = typeof children === "string" ? children : "";
+    const isBlock =
+      (className?.includes("hljs") ?? false) ||
+      (className?.startsWith("language-") ?? false) ||
+      text.includes("\n");
+    if (isBlock) {
+      return (
+        <code className={className} {...props}>
+          {children}
+        </code>
+      );
+    }
+    return (
+      <code className="bg-divider/40 px-1.5 py-0.5 rounded text-[0.72em]" {...props}>
+        {children}
+      </code>
+    );
+  },
   pre: (props) => (
     <pre className="bg-brown/5 p-4 rounded overflow-x-auto mb-5 text-[0.72em]" {...props} />
+  ),
+  table: (props) => (
+    <div className="overflow-x-auto mb-5">
+      <table className="w-full text-left border-collapse text-[0.95em]" {...props} />
+    </div>
+  ),
+  th: (props) => (
+    <th className="border-b border-divider px-3 py-2 font-semibold text-brown align-top" {...props} />
+  ),
+  td: (props) => (
+    <td className="border-b border-divider/60 px-3 py-2 align-top" {...props} />
   ),
   hr: () => <hr className="border-divider my-10" />,
   img: (props) => (

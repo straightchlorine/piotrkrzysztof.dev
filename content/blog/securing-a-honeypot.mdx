@@ -8,7 +8,7 @@ A honeypot is a system or service meant to be attacked. It lets bots and people
 brute-force a fake service and records what they do - usernames, passwords,
 commands, downloaded malware, source IPs.
 
-https://honey.piotrkrzysztof.dev/
+[honey.piotrkrzysztof.dev](https://honey.piotrkrzysztof.dev/)
 
 The project is called [Honeywatch](https://github.com/straightchlorine/honeywatch)
 ([overview](/work/honeywatch)) and does exactly that. It's a university project for a
@@ -250,24 +250,19 @@ and an SSH jump host.
 The tailnet supersedes both - same idea of getting onto a private network before
 touching SSH - just less manual and more extensible.
 
-## The full picture
+## Overview
 
 ```
-                         Internet
-                            │
-            ┌───────────────┴───────────────┐
-        :22 (Cowrie)                    :443 (HTTPS)
-            │                               │
-   ┌────────────────────┐         ┌────────────────────────┐
-   │   Honeypot VPS     │         │   Hetzner k3s          │
-   │  ──────────────    │         │  Traefik + cert-manager│
-   │  cowrie  (isolated)│         │  Dashboard (Vue)       │
-   │  egress-proxy      │         │  ts-egress sidecar     │
-   │  ─ tailnet ─────── │◄────────┤   (/api over tailnet)  │
-   │  nginx             │ tailnet └────────────────────────┘
-   │  api / ingestor    │
-   │  postgres / grafana│   (backend network: no internet)
-   └────────────────────┘
+Internet
+  |
+  +-- :22  --> Cowrie         honeypot VPS  (isolated, read-only)
+  |
+  +-- :443 --> Traefik + TLS  Hetzner k3s
+                |
+                +-- /     --> Dashboard (Vue)
+                +-- /api  --> egress --[tailnet]--> nginx --> API
+
+Honeypot backend stays internal.
 ```
 
 None of it is exotic or elaborate, but I learned a lot - it's the first project where

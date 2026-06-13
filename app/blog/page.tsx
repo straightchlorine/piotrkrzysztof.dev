@@ -31,6 +31,7 @@ export default function BlogIndex() {
                     year: "numeric",
                     month: "long",
                     day: "numeric",
+                    timeZone: "UTC",
                   })}
                 </time>
                 {post.description && (

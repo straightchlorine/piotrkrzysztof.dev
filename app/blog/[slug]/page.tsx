@@ -78,6 +78,7 @@ export default async function BlogPost({ params }: Props) {
             year: "numeric",
             month: "long",
             day: "numeric",
+            timeZone: "UTC",
           })}
         </time>
         <div className="prose-custom">

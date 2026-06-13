@@ -25,6 +25,14 @@ function readMdxFile(filePath: string) {
   return { data, content };
 }
 
+function toDateString(value: unknown): string {
+  // YAML parses an unquoted `date: 2026-06-07` into a Date object; normalise
+  // to a stable YYYY-MM-DD string so server and client render identically
+  // (avoids the timezone-dependent hydration mismatch).
+  if (value instanceof Date) return value.toISOString().slice(0, 10);
+  return typeof value === "string" ? value : String(value ?? "");
+}
+
 export function getBlogPosts(): BlogPost[] {
   const dir = path.join(contentDir, "blog");
   if (!fs.existsSync(dir)) return [];
@@ -35,7 +43,7 @@ export function getBlogPosts(): BlogPost[] {
       return {
         slug: file.replace(/\.mdx$/, ""),
         title: data.title,
-        date: data.date,
+        date: toDateString(data.date),
         description: data.description,
         content,
       };
@@ -50,7 +58,7 @@ export function getBlogPost(slug: string): BlogPost | undefined {
   return {
     slug,
     title: data.title,
-    date: data.date,
+    date: toDateString(data.date),
     description: data.description,
     content,
   };

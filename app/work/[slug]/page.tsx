@@ -20,9 +20,17 @@ export async function generateMetadata({ params }: Props): Promise<Metadata> {
   const { slug } = await params;
   const study = getCaseStudy(slug);
   if (!study) return {};
+  const url = `/work/${slug}`;
   return {
     title: study.title,
     description: study.description,
+    alternates: { canonical: url },
+    openGraph: {
+      type: "website",
+      url,
+      title: study.title,
+      description: study.description,
+    },
   };
 }
 

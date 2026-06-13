@@ -1,12 +1,37 @@
 import Link from "next/link";
+import type { Metadata } from "next";
 import { Nav } from "@/components/nav";
 import { getCaseStudies } from "@/lib/content";
+
+export const metadata: Metadata = {
+  alternates: { canonical: "/" },
+};
+
+const personLd = {
+  "@context": "https://schema.org",
+  "@type": "Person",
+  name: "Piotr Krzysztof Lis",
+  alternateName: "Piotr Krzysztof",
+  url: "https://piotrkrzysztof.dev",
+  jobTitle: "Software Engineer",
+  sameAs: [
+    "https://github.com/straightchlorine",
+    "https://codeberg.org/piotrkrzysztof",
+    "https://pypi.org/user/straightchlorine",
+    "https://hub.docker.com/u/straightchlorine",
+    "https://www.linkedin.com/in/straightchlorine"
+  ],
+};
 
 export default function Home() {
   const studies = getCaseStudies();
 
   return (
     <div className="max-w-2xl mx-auto px-6 pt-24 pb-16">
+      <script
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{ __html: JSON.stringify(personLd) }}
+      />
       <h1 className="text-5xl md:text-6xl font-bold mb-4">Piotr Krzysztof</h1>
       <p className="text-xl text-brown-muted mb-16">
         Software, written deliberately.

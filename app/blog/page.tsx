@@ -6,6 +6,7 @@ import type { Metadata } from "next";
 export const metadata: Metadata = {
   title: "Blog",
   description: "Notes on software, learning, and projects.",
+  alternates: { canonical: "/blog" },
 };
 
 export default function BlogIndex() {

@@ -6,6 +6,7 @@ import type { Metadata } from "next";
 export const metadata: Metadata = {
   title: "Work",
   description: "Selected open-source projects and case studies.",
+  alternates: { canonical: "/work" },
 };
 
 export default function WorkIndex() {

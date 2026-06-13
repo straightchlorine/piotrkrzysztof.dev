@@ -1,0 +1,250 @@
+---
+title: "Fly.io worker process silently freezing after a couple of hours"
+date: 2026-03-22
+description: "Debugging a silently stopping worker on Fly.io - despite
+the process in the dashboard being healthy and no logs."
+---
+
+I've been hitting a recurring issue with a worker machine on Fly.io, which
+silently stops working from time to time. It's quite random. It may stop
+after 2 hours or after 12 hours and anywhere in between.
+
+I filed a support ticket, but it wasn't that much help. Writing this for the
+sake of documentation and keeping the learnings.
+
+<TLDR>
+```python
+pool_recycle = 60,
+connect_args = {
+    "connect_timeout": 10,
+    "keepalives": 1,
+    "keepalives_idle": 15,
+    "keepalives_interval": 5,
+    "keepalives_count": 3,
+}
+```
+</TLDR>
+
+
+## Setup
+
+Two process groups:
+ - `app` (HTTP via uvicorn)
+ - `worker` (Python background job processor).
+
+The worker has no `[http_service]` - it just polls a database and processes jobs.
+
+- Region: `fra`, `shared-cpu-1x`, 2GB RAM
+- Restart policy: `always` with 5 retries
+
+```toml
+[processes]
+  app = "uvicorn main:app --host 0.0.0.0 --port 8000"
+  worker = "python -m worker"
+
+[http_service]
+  auto_stop_machines = 'off'
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ['app']
+
+[[restart]]
+  policy = "always"
+  retries = 5
+  processes = ["worker"]
+
+[[vm]]
+  memory = '2gb'
+  cpu_kind = 'shared'
+  cpus = 1
+  processes = ['worker']
+```
+
+## What happens
+
+After a deploy, the worker starts fine and is processing correctly. After some time
+it silently stops doing anything. No crash, no errors, no OOM. The last log entry
+is the periodic heartbeat.
+
+`fly machine status` shows the machine as `started`. Connecting to the machine
+remotely confirms the process is still alive.
+
+## Diagnostics from inside the stuck machine
+
+```bash
+$ cat /proc/<PID>/syscall
+0x… 0x1 0xffffffffffffffff …    # poll() with timeout=-1 (infinite)
+
+$ cat /proc/<PID>/stack
+[<0>] do_poll.constprop.0+0x231/0x360
+[<0>] do_sys_poll+0x164/0x240
+[<0>] __x64_sys_poll+0x41/0x140
+
+$ grep -E "State|Threads|VmRSS" /proc/<PID>/status
+State:    S (sleeping)
+VmRSS:     198060 kB       # ~193MB of 2048MB
+Threads:    1
+```
+
+The process is stuck in `poll()` with an infinite timeout.
+
+Not crashed, not OOM'd - frozen. A fresh Python process started via SSH
+on the same machine can query the database without issues.
+
+Restarting the machine fixes it. Until the next time the issue occurs.
+
+## What I've ruled out
+
+- **Application crash** - `try/except` around the entire poll loop,
+    logs errors with full stack trace. Nothing logged.
+- **OOM** - 193MB used out of 2048MB.
+- **Stale DB connections** - `pool_pre_ping=True` and `pool_recycle=300`.
+    Fresh process on same machine connects fine. (This one turned out to be
+    wrong - see Resolution.)
+- **Auto-stop** - `auto_stop_machines = 'off'` on the app process;
+    worker has no service definition so Fly Proxy shouldn't be involved at all.
+
+## Logs
+
+The worker emits a heartbeat every ~30 seconds. Here's what a transition from working to stuck looks like:
+
+```
+2026-02-24T12:24:19Z app[<id-worker>] fra [info] Worker alive — in-flight: 0, futures: 0
+2026-02-24T12:24:50Z app[<id-worker>] fra [info] Worker alive — in-flight: 0, futures: 0
+2026-02-24T12:26:26Z app[<id-worker>] fra [info] WATCHDOG: Worker loop stalled for 81s, forcing exit
+2026-02-24T12:26:27Z app[<id-worker>] fra [info] Main child exited normally with code: 1
+2026-02-24T12:26:27Z app[<id-worker>] fra [info] Starting clean up.
+2026-02-24T12:26:27Z app[<id-worker>] fra [info] reboot: Restarting system
+```
+
+The watchdog catches it here - the main loop stalled for 81 seconds between heartbeats,
+so the watchdog thread forces an exit.
+
+Firecracker restarts the VM, the worker comes back, resets orphaned jobs, and runs fine again:
+
+```
+2026-02-24T12:26:36Z app[<id-worker>] fra [info] Worker started (attempt 1/5)
+2026-02-24T12:26:36Z app[<id-worker>] fra [info] Worker started (ID: worker-04501de9)
+2026-02-24T12:26:36Z app[<id-worker>] fra [info] Configuration: POLL_INTERVAL=2s, STALE_TIMEOUT=0:10:00, MAX_CONCURRENT=5
+2026-02-24T12:26:37Z app[<id-worker>] fra [info] Reset 27 orphaned jobs from previous worker instance
+2026-02-24T12:27:08Z app[<id-worker>] fra [info] Worker alive — in-flight: 0, futures: 0
+```
+
+Until it freezes again.
+
+## Database connectivity issues compound the problem
+
+The app machine (`<id-application>`) also hits PgBouncer timeouts from time to time:
+
+```
+2026-02-24T08:00:22Z app[<id-application>] fra [info] Health check failed:
+  (psycopg2.OperationalError) connection to server at "pgbouncer.*.flympg.net",
+  port 5432 failed: timeout expired
+```
+
+And the worker machine hits the same thing during its poll cycle:
+
+```
+2026-03-03T09:33:13Z app[<id-worker>] fra [info] Poll cycle error (1):
+  (psycopg2.OperationalError) connection to server at "pgbouncer.*.flympg.net",
+  port 5432 failed: timeout expired
+```
+
+The worker handles this gracefully - it logs the error and retries on the
+next poll cycle. But the PgBouncer timeouts happening on both machines suggest
+either that something at the networking or Postgres layer isn't working correctly
+or that our pool configuration isn't well suited to Fly.io.
+
+The freeze might be a case where the connection doesn't cleanly time out,
+but hangs indefinitely in `poll()`.
+
+## The pattern
+
+1. Deploy. Worker starts, processes jobs.
+2. Some time passes. Worker freezes mid-`poll()`.
+3. Watchdog catches it (if the stall exceeds the threshold), forces exit.
+4. Firecracker restarts the VM. Worker comes back.
+5. Repeat.
+
+The watchdog is a temporary solution. The underlying issue - why `poll()` hangs with an
+infinite timeout on what should be a connection with `pool_recycle=300` - remained
+unsolved at this point.
+
+## Resolution
+
+This situation happened a few weeks ago. I was a bit lost - spent some time
+with different options for the database as well as making the watchdog even more
+aggressive - to minimize downtime.
+
+I was convinced this was Fly.io's problem - not mine. In a meeting I got fair
+pushback: I had no real proof to back that up. The suggestion was to set up the worker
+on our existing Hetzner infrastructure. If it still freezes on Hetzner - the bug is mine.
+If it doesn't - it's Fly.io.
+
+It was my first actual work with Kubernetes in a professional setting.
+So - on the same evening I [migrated the worker to a K3s cluster](/blog/migrating-worker-fly-to-k3s)
+on Hetzner.
+
+Except that I made a fundamental mistake: the experiment was flawed from the start.
+
+- Regardless of the machine - I was still connected to the *same* managed Postgres.
+
+So what I was proving to myself was:
+
+*If it keeps on happening - it's truly the database connection - not my code.*
+(Except it **is** my code defining **how** the worker connects to the database.)
+
+I started noticing similar issues after the migration. My own watchdog
+was *healing* both the Fly worker and k3s worker.
+
+Quite certain that it's the database - after 4 days of observation - I went back to the connection args.
+Around a month before the migration `pool_recycle` was set to 300.
+I deemed it plenty restrictive, taking into account that by default the option
+is disabled (`-1`) and in [SQLAlchemy docs](https://docs.sqlalchemy.org/en/21/core/pooling.html)
+it's set to `3600`.
+
+I tightened that config:
+- `pool_recycle` from 300 down to 60,
+- `keepalives_idle` from 30s to 15s,
+- `keepalives_interval` from 10s to 5s.
+
+It looked like so:
+
+```python
+pool_recycle = 60,
+connect_args = {
+    "connect_timeout": 10,
+    "keepalives": 1,
+    "keepalives_idle": 15,
+    "keepalives_interval": 5,
+    "keepalives_count": 3,
+}
+```
+
+And freezes did stop. Turns out that quick recycling and not letting
+the connections go stale - was the way to go.
+
+The change is consistent with the failure observed in `/proc/<pid>/stack` - though
+`pool_recycle` and the keepalives were tightened together, so I can't point at a
+single setting with certainty.
+
+Fortunately, the [migration](/blog/migrating-worker-fly-to-k3s) took a single evening. It did confirm
+the suspicion that Postgres connections were going stale very fast - the cause
+of the entire commotion.
+
+But this was something I could have tested by bumping the worker to 2 replicas for a
+single night. I didn't take the time to think the solution through - I didn't weigh
+what the experiment was worth, or what I even wanted it to prove.
+
+It wasn't all negatives, however. The migration left us with a GitOps pattern
+for deploying other services, and scaling on Hetzner comes at more favorable rates.
+We also tested multiple worker replicas running at the same time and
+ruled out duplications or blocking. Lastly - I learned a lot.
+
+Since the config change, the watchdog hasn't activated. Not on Fly.io, nor
+on Kubernetes.
+
+**Update (June 2026):** a couple of months in - still no watchdog activations
+on either platform.
+
+S.D.G

@@ -1,0 +1,324 @@
+---
+title: "Worker migration from Fly.io to K3s cluster"
+date: 2026-03-29
+description: "Process and concerns of deploying a worker on a different infrastructure."
+---
+
+This post is a continuation and an extension of the post about
+[the Fly.io worker issue](/blog/fly-worker-problems). For specifics about
+the problem - you can see them there.
+
+It goes through the process of setting up a worker on an existing `k3s`
+cluster, which works with a managed Postgres instance still on the Fly.io network.
+
+## The Plan
+
+The worker already had a separate `Dockerfile` (no frontend, backend-only)
+and a health endpoint so that Kubernetes can probe it.
+
+The setup:
+- **ArgoCD** manages K8s manifests
+- **GitHub Actions** manages runtime values via `kubectl`
+- **WireGuard** tunnels from the K3s node into Fly.io's network for Postgres access
+
+```
+Worker Pod -> pg-proxy Service -> socat (host network) -> WireGuard -> Fly Postgres
+```
+
+## Setting Up the Tunnel
+
+Since the project relies on managed Postgres, it's not possible to allocate a public
+IP address or expose ports externally. This is unlike regular Fly.io applications,
+for which it's possible and explained in
+[external connections guide](https://fly.io/docs/postgres/connecting/connecting-external/).
+
+Trying `fly ips allocate-v4` resulted only in `Could not find App`, since it's
+a separate product.
+
+The only way to reach managed Postgres from outside is through WireGuard.
+Every Fly.io organization has a private IPv6 network (the `fdaa::/16` range),
+and you can create WireGuard peers to join it from external machines.
+
+```bash
+# Generate a WireGuard peer config for the K3s node
+fly wireguard create <org-name> fra k3s-worker
+
+# On the K3s machine
+sudo cp k3s-worker.conf /etc/wireguard/fly.conf
+sudo wg-quick up fly
+sudo systemctl enable wg-quick@fly  # persist across reboots
+
+# Test whether managed postgres is reachable from the host
+psql "host=fdaa:x:x:0:1::2 dbname=mydb user=postgres sslmode=disable"
+```
+
+## The Architecture Split
+
+ArgoCD constantly reconciles cluster state against what's in git. The problem was
+that secrets weren't in git. So ArgoCD cleared them out, even though they were set
+in the GitHub Actions workflows. To correct it:
+
+```yaml
+# argocd-app.yaml - tell ArgoCD to ignore CI-managed fields
+syncOptions:
+  - RespectIgnoreDifferences=true
+ignoreDifferences:
+  - group: apps
+    kind: Deployment
+    jsonPointers:
+      - /spec/template/spec/containers/0/image
+  - kind: Secret
+    jsonPointers:
+      - /data
+  - kind: ConfigMap
+    jsonPointers:
+      - /data
+```
+
+Two options:
+
+**`ignoreDifferences`** ensures that Argo's diff engine ignores outlined paths
+when comparing the cluster state against git.
+
+**`RespectIgnoreDifferences=true`** ensures that Argo's sync engine also
+skips those paths when applying manifests. I missed it initially and during
+the sync secrets were cleared out.
+
+To complement the options above, I also added annotations for Secret and ConfigMap:
+
+```yaml
+annotations:
+  argocd.argoproj.io/compare-options: IgnoreExtraneous
+  argocd.argoproj.io/sync-options: Prune=false
+```
+
+`IgnoreExtraneous` ensures that extraneous resources tagged with it do not contribute
+to its unsynced state. `Prune=false` on the other hand ensures that even if something
+disappears from git - it won't be removed.
+
+In this case it's likely too much - after all the configuration above should
+already ensure configuration won't be removed.
+
+## GHCR
+
+Private GitHub repo means private container images on GHCR.
+Registry inherits visibility from the repo - if the repo is private,
+the images are private. K3s needed credentials to pull them.
+
+
+Credentials are stored as a secret and referenced in the deployment:
+
+```yaml
+imagePullSecrets:
+  - name: ghcr-pull-secret
+```
+
+Secret contains a classic GitHub PAT with `write:packages` scope. Important note:
+
+- **Fine-grained tokens don't support packages** - they have repository permissions
+    but nothing for packages.
+
+## arm64
+
+K3s runs on Hetzner ARM. GitHub Actions runners are amd64. So I also needed to
+build the image for arm64. Not doing so resulted in the following error:
+
+```
+exec /usr/local/bin/python: exec format error
+```
+
+A Python image built for x86_64 can't be executed on aarch64.
+
+First, I started with QEMU emulation step:
+
+```yaml
+- uses: docker/setup-qemu-action@v3      # install CPU emulators
+- uses: docker/setup-buildx-action@v3    # enable multi-platform builds
+- uses: docker/build-push-action@v5
+  with:
+    platforms: linux/arm64                # only build for arm64
+```
+
+However it quickly turned out that it was very slow. Even for a relatively small
+image, which wasn't acceptable. I started to look around and
+[found out](https://github.com/actions/partner-runner-images/blob/main/images/arm-ubuntu-24-image.md)
+that there **is** a runner image exactly for our use case, so I replaced `ubuntu-latest`
+with `ubuntu-24.04-arm`.
+
+## Networking
+
+WireGuard runs on the host. The worker pod runs in its own isolated network namespace.
+Pod can read other pods and services through K8s networking, but it cannot see the host.
+
+So worker could not see the WireGuard tunnel that was set up:
+
+```
+sqlalchemy.exc.OperationalError: connection to server at "fdaa:x:x:0:1::2",
+port 5432 failed: Network is unreachable
+```
+
+The quick fix would be `hostNetwork: true` on the worker pod. The pod
+would then share the host's network namespace. However it's too much access
+for our use case - I wanted to enable easy scaling later and that would make
+it impossible without removing this option.
+
+Instead, I set up a TCP proxy, a separate pod that *does* use `hostNetwork: true`,
+but only forwards TCP connections:
+
+```yaml
+# pg-proxy - socat pod, bridging K8s networking to the host's WireGuard
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pg-proxy
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate  # can't have 2 pods on same port
+  template:
+    spec:
+      hostNetwork: true
+      containers:
+        - name: socat
+          image: alpine/socat:1.8.0.1
+          # hostNetwork exposes 5433 on the node - firewall blocks external access
+          args: ["TCP-LISTEN:5433,fork,reuseaddr", "TCP6:[fdaa:x:x:0:1::2]:5432"]
+          livenessProbe:
+            exec:
+              command: ['sh', '-c',
+                'socat -T2 - TCP6:[fdaa:x:x:0:1::2]:5432,connect-timeout=2
+                 </dev/null >/dev/null']
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pg-proxy
+spec:
+  selector:
+    app: pg-proxy
+  ports:
+    - port: 5432
+      targetPort: 5433
+```
+
+The worker networking is unchanged - it connects through the K8s networking. Only change
+is the database address, since it needs to point to the socat `pg-proxy.worker.svc:5432`.
+
+The liveness probe checks *upstream* connectivity as well. It attempts to reach
+Postgres through the tunnel - if it fails, the proxy is restarted and the
+connection attempted again.
+
+### `bind=127.0.0.1`
+
+Initially, I tried `TCP-LISTEN:5433,fork,reuseaddr,bind=127.0.0.1` to avoid
+exposing port 5433 on the host's external interface. However, that didn't work.
+
+With `hostNetwork: true` the pod shares the host's namespace. Kubernetes
+then routes traffic to it by sending it to the node's **real IP address**.
+With socat listening only on loopback, that traffic gets `connection refused`, since
+it's listening to the wrong interface.
+
+I removed the bind and ensured external connection is blocked by the firewall.
+
+### Init container
+
+The worker deployment includes an init container that waits for the proxy.
+It runs before the main container starts. If init fails - K8s quickly
+retries without the overhead of starting the worker.
+
+```yaml
+initContainers:
+  - name: wait-for-pg-proxy
+    image: busybox:1.36
+    command: ['sh', '-c',
+      'TIMEOUT=300; START=$(date +%s);
+       while :; do
+         nc -z -w5 pg-proxy.worker.svc 5432 && exit 0;
+         ELAPSED=$(($(date +%s) - START));
+         [ "$ELAPSED" -ge "$TIMEOUT" ] &&
+           echo "pg-proxy not available after ${TIMEOUT}s" && exit 1;
+         echo "waiting for pg-proxy... (${ELAPSED}s)"; sleep 2;
+       done']
+```
+
+### `Recreate` strategy
+
+By default `RollingUpdate` is set - new pod starts, waits to become healthy,
+and only then the old one is killed. Since the host's network is shared -
+that would mean two processes listening on the same port. The new pod would fail
+with `address already in use` and the rollout would never complete.
+
+`Recreate` ensures that first the old pod is killed and then new one is started.
+This causes a brief downtime, which is acceptable - worker retries connections
+automatically and we still have Fly.io worker running. Solution to that would
+be to connect the socat or the worker pod itself to the WireGuard network and
+not the host.
+
+I really like the second solution and used it for one of my
+university side projects - [the SSH honeypot](/blog/securing-a-honeypot) ([repo](https://github.com/straightchlorine/honeywatch)).
+
+In this scenario, it was meant to be an experiment and we still had Fly.io worker
+running. So downtime for the cluster doesn't mean downtime for the application.
+That's what made me accept the risk and leave the better option for later.
+
+## Security
+
+The K8s API server (port 6443) is exposed to the internet so GitHub Actions
+can reach it. This is a real tradeoff, not an ideal setup - Sealed Secrets would
+remove the need for CI to connect to the cluster at all, and that migration
+will most likely happen in the future.
+
+To limit the exposure in the meantime, I set up a separate `ServiceAccount` for
+the CI to use. It enforces **TLS**, **token authentication** and **namespace
+scoping** to restrict it only to the namespace with the worker:
+
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: github-deploy
+  namespace: worker
+roleRef:
+  kind: ClusterRole
+  name: admin           # admin within worker namespace only
+subjects:
+  - kind: ServiceAccount
+    name: github-deploy
+    namespace: worker
+```
+
+The `admin` ClusterRole is scoped by the RoleBinding to a single namespace. Even
+if the token leaks, the blast radius is limited to updating deployments in
+`worker`.
+
+## Result
+
+```
+Worker alive - in-flight: 0, futures: 0
+Worker started (attempt 1/5)
+Worker started (ID: worker-60aa5293)
+Configuration: POLL_INTERVAL=2s, STALE_TIMEOUT=0:10:00, MAX_CONCURRENT=5
+Reset 27 orphaned jobs from previous worker instance
+Worker alive — in-flight: 0, futures: 0
+```
+
+The worker connected to Postgres, picked up orphaned jobs, and started polling.
+
+### Overview
+
+
+| Component | Responsibility |
+|---|---|
+| **ArgoCD** | Syncs K8s manifests from git |
+| **GitHub Actions** | Builds arm64 image, pushes secrets/config, triggers rollout |
+| **socat** | Bridges pod network to host's WireGuard tunnel |
+| **WireGuard** | Connects K3s host to Fly.io's private network |
+
+
+**Update (June 2026):** a couple of months in and still stable. The manifests
+have since grown to also manage Gatus and the Actions Runner Controller - and
+along with it, the Sealed Secrets controller. The worker secrets themselves are
+yet to be migrated, so the CI flow described above still stands.
+
+S.D.G

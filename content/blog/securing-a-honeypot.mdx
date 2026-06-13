@@ -1,0 +1,276 @@
+---
+title: "Securing a VPS you want to have compromised."
+date: 2026-06-07
+description: "Building the infrastructure for an SSH honeypot, where the box that gets attacked is supposed to look like an ordinary, badly secured VPS."
+---
+
+A honeypot is a system or service meant to be attacked. It lets bots and people
+brute-force a fake service and records what they do - usernames, passwords,
+commands, downloaded malware, source IPs.
+
+https://honey.piotrkrzysztof.dev/
+
+The project is called [Honeywatch](https://github.com/straightchlorine/honeywatch)
+([overview](/work/honeywatch)) and does exactly that. It's a university project for a
+cybersecurity class. Cowrie
+(the SSH honeypot) captures attacks, a Python ingestor parses its logs into
+PostgreSQL, a Flask API serves the data, and a Vue.js dashboard shows it.
+
+The goal here was to make the dashboard public while keeping the deployment
+inconspicuous - the honeypot box should look like nothing more than a badly secured
+VPS, not a machine wired into monitoring.
+
+## The threat model
+
+The project, by design, hands attackers access. So the main concern flips: the
+honeypot itself has to be isolated from everything else, so that a compromise stops
+there.
+
+What I'm defending against:
+
+1. Attacker connects to Cowrie on port 22 (intended).
+2. Attacker tries to escape Cowrie's fake shell into the container (possible with the right CVE).
+3. If they reach the container, can they get out to the internet, or reach the database?
+4. If they reach the host, can they see the API? Grafana? The other machine?
+5. If they find the deploy path, can they reach the real infrastructure?
+
+Every step needs to answer "no" on its own. If one layer fails, the next one
+should still hold.
+
+## Docker network isolation
+
+Docker Compose puts every container on one bridge network by default, and they can
+all reach each other. In this project that would mean a container escape from Cowrie
+gives direct access to PostgreSQL.
+
+To keep that from happening, the stack is split across several networks,
+and most of them have no route to the internet at all:
+
+```yaml
+networks:
+  cowrie-ingress:     # only path for inbound :22 -> cowrie:2222
+    internal: false
+    driver_opts:
+      # outbound from cowrie leaves with an RFC1918 source and dies upstream
+      com.docker.network.bridge.enable_ip_masquerade: "false"
+  honeypot:           # cowrie + egress-proxy, nothing else
+    internal: true
+  egress:             # the egress-proxy's only way out
+    internal: false
+  backend:            # postgres, api, ingestor, grafana, nginx
+    internal: true
+  expose:             # nginx's tailnet-facing side
+    internal: false
+```
+
+`internal: true` skips the NAT rules Docker would normally add, so containers on
+that network can talk to each other but cannot start connections to the internet.
+Cowrie is on `honeypot` (internal) and `cowrie-ingress`. Everything that holds
+data - PostgreSQL, the API, the ingestor, Grafana - sits on `backend`, which is also
+internal.
+
+Cowrie therefore has no network path to the database, and the database has no path
+to the internet.
+
+### Cowrie's internet connection
+
+Cowrie still needs *some* egress - attackers expect a box that can fetch their
+payloads, and watching what they try to download is part of the point. Instead of
+giving it real internet access, its outbound is forced through a small
+[tinyproxy](https://tinyproxy.github.io/) sidecar:
+
+```yaml
+cowrie:
+  environment:
+    - http_proxy=http://egress-proxy:8888
+    - https_proxy=http://egress-proxy:8888
+  networks:
+    - honeypot        # internal - no direct route out
+    - cowrie-ingress
+```
+
+Whatever Cowrie fetches goes through the proxy. It gets logged on the way. Whatever
+tries to skip it has nowhere to go. The `honeypot` network is internal, so there's
+no route out of it in the first place.
+
+`cowrie-ingress`, the one bridge that does reach the outside, has masquerade turned off -
+a packet Cowrie sends directly keeps its private source address and gets dropped at
+the host firewall (firewalld) instead of being translated onto the internet.
+
+The proxy is the only real way out, and it runs with its capabilities trimmed
+to what its iptables rules need - `NET_RAW` isn't one of them.
+
+### Ingestor
+
+Cowrie writes JSON logs to a shared Docker volume. The ingestor reads them:
+
+```yaml
+cowrie:
+  volumes:
+    - cowrie-logs:/cowrie/cowrie-git/var/log/cowrie
+ingestor:
+  volumes:
+    - cowrie-logs:/logs:ro     # read-only
+  networks:
+    - backend                  # no shared network with cowrie
+```
+
+There's no network connection between the two. Even with full control of the Cowrie
+container, an attacker can write files into the log volume - but the ingestor only
+reads them, and it's parsing JSON, not executing it.
+
+## Hardening the containers
+
+The container shares the host kernel, so an escape usually comes down to a kernel
+bug. I can't rule those out, so I keep what the process is allowed to do to a minimum -
+if one ever gets out, there's little to work with:
+
+```yaml
+cowrie:
+  read_only: true
+  tmpfs:
+    - /tmp
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+```
+
+- `read_only: true` so an attacker can't drop scripts or modify binaries. The `tmpfs` mount gives
+    Cowrie scratch space that lives in memory and vanishes on restart.
+- `cap_drop: ALL` removes every Linux capability. Cowrie just needs to listen on a
+  TCP port and write logs.
+- `no-new-privileges` stops a process from gaining privileges through a setuid
+  binary.
+
+Every image is pinned by digest. Every service has memory, CPU and PID limits, so a
+single container can't exhaust the host. None of this makes an escape impossible - it
+just means that if one happens, the attacker doesn't have much to work with.
+
+## Privileges in Postgres
+
+The database has the same idea applied at the SQL level. The ingestor and the API
+don't share the owner role - `postgres/init.sh` creates a role per service on first
+boot:
+
+- `honeywatch_ingestor` can read and write the tables it fills.
+- `honeywatch_api` is **SELECT-only**.
+
+The API is the one component indirectly reachable from the public dashboard, so
+it gets as little as possible.
+
+## No public management ports
+
+The API and Grafana don't need to face the internet on the honeypot box. An attacker
+scanning it should see only Cowrie.
+
+The nginx in front of them binds only to the loopback and Headscale tailnet
+interface - not the public IP of the VPS:
+
+```yaml
+proxy:                       # nginx
+  ports:
+    - "${TS_IP}:5000:5000"   # API, tailnet interface only
+    - "${TS_IP}:3000:3000"   # Grafana
+    - "127.0.0.1:5000:5000"
+    - "127.0.0.1:3000:3000"
+```
+
+`TS_IP` is the box's address on the tailnet. From the public internet those ports
+don't exist. The reverse proxy also keeps the API read-only at the edge - it rejects
+anything that isn't `GET`/`HEAD`/`OPTIONS`, rate-limits per IP, and sets security
+headers - but the main point is that you have to be on the tailnet to reach it at all.
+
+So an attacker who runs `nmap` against the honeypot sees port 22 (Cowrie).
+The dashboard, which the whole internet *can* reach, lives on a different machine entirely.
+
+## Tailnet
+
+The dashboard needs to talk to the honeypot's API, but that API has no public port.
+The two machines are joined by a tailnet instead - a self-hosted
+[Headscale](https://github.com/juanfont/headscale) control server with Tailscale
+clients.
+
+Tailscale runs on WireGuard underneath, so the link is encrypted and neither machine
+has to open anything to the public internet.
+
+The dashboard runs on a Hetzner k3s cluster behind Traefik, with cert-manager
+handling Let's Encrypt. Requests to `/api` are sent to a small Tailscale *egress*
+pod that joins the same tailnet and forwards them across it to the honeypot's nginx:
+
+```
+Internet -> Traefik (TLS) -> /api -> ts-egress pod -> tailnet -> honeypot nginx -> API
+```
+
+That egress pod is the one thing in the cluster allowed onto the tailnet, and a
+NetworkPolicy pins what it may reach:
+- DNS,
+- Tailscale control/relay ports,
+- cluster API.
+
+If it were compromised, it can't wander into the rest of the cluster or the open internet.
+
+## Deploying to a machine that's under attack
+
+Releases build the images, push them to GHCR, and roll them out. The honeypot's real
+SSH isn't on the public internet either - it's on the tailnet too.
+
+So the runner joins the tailnet with `tailscale/github-action@v4`, then uses plain
+`ssh`:
+
+```yaml
+- name: Join tailnet
+  uses: tailscale/github-action@v4
+  with:
+    authkey: ${{ secrets.TS_AUTHKEY }}
+    args: --login-server=https://vpn.codextechnologies.org
+
+- name: Roll out over the tailnet
+  run: |
+    ssh -F ~/.ssh/config honeypot "
+      cd /opt/honeywatch
+      docker compose -f docker-compose.prod.yml pull
+      docker compose -f docker-compose.prod.yml up -d --remove-orphans
+    "
+```
+
+Safety measures for `ssh` connection:
+
+- The honeypot's host key is pinned from a secret with `StrictHostKeyChecking yes`
+    and no trust-on-first-use fallback. If the key presented doesn't match,
+    the connection is refused.
+- Authentication is key-only.
+- The images are signed with cosign (keyless, tied to the workflow's own identity),
+    and after the rollout the workflow verifies the running images against it.
+
+Earlier in the project this worked differently. It's the one piece of the original plan
+that actually shipped. Before Headscale, the runner reached the box over a WireGuard link
+and an SSH jump host.
+
+The tailnet supersedes both - same idea of getting onto a private network before
+touching SSH - just less manual and more extensible.
+
+## The full picture
+
+```
+                         Internet
+                            │
+            ┌───────────────┴───────────────┐
+        :22 (Cowrie)                    :443 (HTTPS)
+            │                               │
+   ┌────────────────────┐         ┌────────────────────────┐
+   │   Honeypot VPS     │         │   Hetzner k3s          │
+   │  ──────────────    │         │  Traefik + cert-manager│
+   │  cowrie  (isolated)│         │  Dashboard (Vue)       │
+   │  egress-proxy      │         │  ts-egress sidecar     │
+   │  ─ tailnet ─────── │◄────────┤   (/api over tailnet)  │
+   │  nginx             │ tailnet └────────────────────────┘
+   │  api / ingestor    │
+   │  postgres / grafana│   (backend network: no internet)
+   └────────────────────┘
+```
+
+None of it is exotic or elaborate, but I learned a lot - it's the first project where
+I genuinely used my own infrastructure all the way. Except the hardware, of course.
+
+S.D.G

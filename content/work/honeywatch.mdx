@@ -1,0 +1,48 @@
+---
+title: "Honeywatch"
+description: "SSH honeypot with a public dashboard for the attacks it records."
+---
+
+## Context
+
+In the first term of my master's I took a cybersecurity class. Passing it needed
+both lab work and a project.
+
+After talking ideas over with a friend and with Claude, we settled on a honeypot.
+Hetzner had just widened its cloud availability around then, so I had the machines
+to run it - and I took the infrastructure side.
+
+I also wanted it to be public. I keep some infrastructure and a domain around, and
+most of that compute sits idle. A honeypot was a way to learn something and put the
+spare capacity to use at the same time.
+
+## Approach
+
+The setup is split across two machines. The honeypot VPS runs Cowrie (the SSH
+honeypot), a Python ingestor that parses its logs into Postgres, a Flask API and
+Grafana - all under Docker Compose. A second Hetzner box runs k3s and serves the
+Vue dashboard.
+
+The two are joined by a self-hosted Tailnet using
+[Headscale](https://github.com/juanfont/headscale). The honeypot keeps no public
+management ports; the dashboard reaches its API across the tailnet. Deploys go
+through GitHub Actions runners that join the same tailnet.
+
+The security side - keeping the honeypot box looking like an ordinary, poorly
+secured VPS while the rest of the infrastructure stays out of reach - had enough to
+it that I wrote it up separately in [securing a honeypot](/blog/securing-a-honeypot).
+
+## Outcome
+
+The project stage is done; the lab part of the class is still ongoing. The dashboard
+is live at [honey.piotrkrzysztof.dev](https://honey.piotrkrzysztof.dev/).
+
+From here it's mostly winding things down. I'd like to polish the frontend so it's
+nicer to look at, and write up some docs on hosting it yourself. I'm also thinking
+about publishing the Python packages to PyPI and the images to Docker Hub - not
+because anyone needs them, just to round the project off.
+
+[GitHub](https://github.com/straightchlorine/honeywatch) &middot;
+[Images](https://github.com/straightchlorine?tab=packages&repo_name=honeywatch)
+
+S.D.G

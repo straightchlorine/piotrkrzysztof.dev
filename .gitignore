@@ -4,3 +4,17 @@ node_modules/
 .env.local
 .vercel
 .vale/styles/
+
+# next.js
+/out/
+
+# typescript (generated)
+*.tsbuildinfo
+next-env.d.ts
+
+# os
+.DS_Store
+
+# local scratch / not for the repo
+claude-confo
+samples/

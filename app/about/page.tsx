@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { Breadcrumb } from "@/components/nav";
 import type { Metadata } from "next";
 
@@ -20,12 +21,12 @@ export default function About() {
           Outside of work, I maintain a few open-source projects &mdash; mostly
           as a way to study things I don&rsquo;t understand well yet. Some of
           them are in the{" "}
-          <a
+          <Link
             href="/work"
             className="text-brown-link underline decoration-brown-link/30 hover:decoration-brown-link transition-colors"
           >
             Work
-          </a>{" "}
+          </Link>{" "}
           section.
         </p>
       </div>

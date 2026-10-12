@@ -4,7 +4,7 @@ import { getBlogPosts } from "@/lib/content";
 import type { Metadata } from "next";
 
 export const metadata: Metadata = {
-  title: "Blog: Debugging and Infrastructure Notes",
+  title: "Blog: debugging and infrastructure notes",
   description:
     "Write-ups from personal projects and client work: what broke, how it was found and what fixed it. Linux, Kubernetes, backend and a bit of frontend.",
   alternates: { canonical: "/blog" },

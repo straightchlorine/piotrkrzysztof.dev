@@ -3,7 +3,7 @@ import { Breadcrumb } from "@/components/nav";
 import type { Metadata } from "next";
 
 export const metadata: Metadata = {
-  title: "About Piotr: Software and Open Source",
+  title: "About Piotr: software and open source",
   description:
     "I write software and try to do it carefully. I also maintain a few open-source projects, mostly to study things I do not understand well yet. Email, GitHub.",
   alternates: { canonical: "/about" },

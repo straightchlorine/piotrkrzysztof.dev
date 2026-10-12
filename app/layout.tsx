@@ -20,6 +20,9 @@ export const metadata: Metadata = {
   twitter: {
     card: "summary_large_image",
   },
+  alternates: {
+    types: { "application/rss+xml": "/feed.xml" },
+  },
   robots: {
     index: true,
     follow: true,

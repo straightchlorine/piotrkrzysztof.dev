@@ -1,7 +1,7 @@
 ---
 title: "Pipecat: Getting interruptions to work"
 date: 2026-03-15
-description: "Implementing MVP with clean interruption handling in Pipecat 0.0.79."
+description: "Getting a Pipecat voice bot to stop talking when the user speaks: cancel_on_interruption, VAD defaults, and the Cartesia HTTP TTS service that made it work."
 ---
 
 A [client project](/blog/voice-early-decisions) with a voice agent
@@ -128,7 +128,7 @@ tts = CartesiaHttpTTSService(
 ```
 
 After switching to the HTTP variant and dropping the unused
-[RTVI](https://docs.rtvi.ai/) components (Daily transport and
+[RTVI](https://docs.pipecat.ai/client/introduction) components (Daily transport and
 `@pipecat-ai/client-js` were used directly), I had a working MVP
 with clean interruptions.
 

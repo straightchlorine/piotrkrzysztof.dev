@@ -4,9 +4,17 @@ import { getBlogPosts } from "@/lib/content";
 import type { Metadata } from "next";
 
 export const metadata: Metadata = {
-  title: "Blog",
-  description: "Notes on software, learning, and projects.",
+  title: "Blog: Debugging and Infrastructure Notes",
+  description:
+    "Write-ups from personal projects and client work: what broke, how it was found and what fixed it. Linux, Kubernetes, backend and a bit of frontend.",
   alternates: { canonical: "/blog" },
+  openGraph: {
+    type: "website",
+    siteName: "Piotr Krzysztof",
+    url: "/blog",
+    images: ["/opengraph-image"],
+  },
+  twitter: { card: "summary_large_image", images: ["/opengraph-image"] },
 };
 
 export default function BlogIndex() {

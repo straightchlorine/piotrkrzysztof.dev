@@ -1,0 +1,430 @@
+---
+title: "Honeywatch: Debugging a Slow Page"
+date: 2026-09-11
+description: "A slow Origins page on the Honeywatch dashboard: Postgres settings that never took effect, 500s nginx could cache, an eviction timer and a stale poll interval."
+---
+
+This is the same project as the [honeypot writeup](/blog/securing-a-honeypot) -
+[Honeywatch](https://github.com/straightchlorine/honeywatch)
+([overview](/work/honeywatch)). The parts that matter here: an ingestor writes
+Cowrie's logs into Postgres and a Flask API reads them. nginx sits in front of
+the API as a cache, and a Vue dashboard polls it. Everything except the
+dashboard runs on one box.
+
+The Origins page - attacks by country - took 17-20 seconds to load, with the
+API box CPU usage % burst while it ran. On load it fetches `/stats/countries`,
+`/stats/asns`, `/stats/ssh-clients` and `/stats/fingerprints`, then re-polls
+them every 120 seconds.
+
+The box is a small Hetzner VPS with 4 GB of RAM. I had/have no plans to
+resize. The goal was to squeeze what I could out of it.
+
+Measuring timings by hand would take a long time. Thankfully, I could leave
+most of this work to Claude - it measured the baseline, wrote it down and
+looked for improvements iteratively.
+
+<TLDR>
+```yaml
+# API box CPU on production:
+# Idle: <5%
+# API call: 60-80% during bursts, still for most requests <50%
+#
+# Local timings:
+# Origins 1.5s -> 0.41s,
+# Top Credentials 133ms -> 65ms.
+#
+# random_page_cost=1.1 was the only Postgres setting that visibly helped.
+# The initdb args *look* applied, but don't change a running cluster;
+# the other runtime settings turned out to be noise or had detrimental impact.
+
+# docker-compose.prod.yml
+# initdb args are read once, when the volume is empty
+POSTGRES_INITDB_ARGS: >-
+  ... -c shared_buffers=128MB -c work_mem=4MB -c max_connections=50 ...
+# runtime settings; applied when the container is (re)created (`up -d`)
+command:
+  - postgres
+  - ...
+  - -c
+  - random_page_cost=1.1
+
+# proxy/nginx.conf
+# an entry stays fresh up until each endpoint's own Cache-Control max-age
+# (30s default, 120s for the stats endpoints, 300s for country detail)
+#
+# an entry is deleted after `inactive` with no requests, fresh or not
+# (was 60s, so the 120s and 300s entries never survived to the next poll)
+#   proxy_cache_path ... inactive=60s   ->   inactive=10m
+
+# api/src/routes/stats.py
+# endpoints set Cache-Control on every response, errors included
+# (nginx then caches a 500 and serves it to every viewer until it expires)
+#   set the header only when status < 400
+```
+</TLDR>
+
+## initdb args
+
+The Postgres service set `shared_buffers=128MB`, `work_mem=4MB` and
+`max_connections=50` - in `POSTGRES_INITDB_ARGS`.
+
+Those args go to `initdb`, which runs once, when the data directory is empty.
+Whatever it writes into `postgresql.conf` at that moment is what the cluster
+keeps. Editing the line later changes nothing on a running instance.
+
+`shared_buffers=128MB` and `work_mem=4MB` are the Postgres defaults. Only
+`max_connections=50` (default 100) would ever have mattered, and only if
+the volume was created after the line was added.
+
+Runtime settings belong in `command:`. It's applied whenever the container is
+created and overrides `postgresql.conf`.
+I checked that precedence on a test container, with the two deliberately
+disagreeing, via `SELECT name, setting, source FROM pg_settings`:
+
+```
+FRESH CLUSTER, INITDB_ARGS says 128MB/4MB, command says 256MB/8MB:
+  shared_buffers  = 32768   (8kB pages = 256MB, source: command line)
+  work_mem        = 8192    (kB = 8MB,          source: command line)
+  shared_preload_libraries = pg_stat_statements  (source: configuration file)
+```
+
+Command line wins for anything it sets. Everything else still comes from the
+file. The `initdb` line stays, since it still sets `max_connections` for a
+fresh install. But nothing in it retunes a running cluster, and nothing was
+checking which values were in effect.
+
+While checking which values were in effect, I also realised that db queries aren't
+properly measured at all. This started out as a *quick and small* project. I was
+complacent and didn't pay pay much attention in the beginning.
+
+Turns out `pg_stat_statements` library was already preloaded by that same
+`initdb` line, but the extension was never created, so nothing was recording.
+
+I put `CREATE EXTENSION pg_stat_statements` into `postgres/init.sql` and since
+it wouldn't apply on a running container - I updated it by hand after the merge.
+Next iteration of query optimizations will have proper support in data.
+
+`proxy/nginx.conf` also is is a bind mount, and compose hashes the service
+definition, not the contents of mounted files.
+
+`up -d` recreated Postgres, since `command:` had changed, and left the proxy
+running with the old config in memory. The nginx change also needed
+`--force-recreate`:
+
+```bash
+docker compose -f docker-compose.prod.yml up -d --force-recreate proxy
+```
+
+Restart wouldn't work, since it reuses existing container, instead of creating
+a new one (which is required).
+
+## `random_page_cost`
+
+`random_page_cost` - what the planner charges for reading a page out of order,
+relative to `seq_page_cost=1.0. Defaults to 4.0.
+
+The Postgres docs say 4.0 already assumes most random reads hit cache, and
+that magnetic disks would want a value *higher* than 4. Once more more reliable
+measurements come from the cluster - it might be worthwhile to test out lower
+value for this one.
+
+Reason is that - almost entire data we have fits within the memory, especially
+if we did some optimizations around `ssh_clients`:
+
+```
+database              1063 MB    (container cap 1024M, host RAM 3.47 GB)
+  ssh_clients          786 MB    client fingerprints
+  sessions             141 MB
+  auth_attempts         92 MB
+  geo_locations         <2 MB
+hot set               ~235 MB
+heap cache hit         95.9%    heap_blks_hit / (hit + read); measured locally
+```
+
+The three tables the dashboard queries fit in the container's 1 GB. A random
+read of a page already in RAM costs about the same as a sequential one.
+
+The hit ratio was measured on my machine with no memory limit. Production caps
+the container at 1024M, so this holds only while the hot tables keep fitting.
+
+The top-credentials query, `GROUP BY username, password` over
+`auth_attempts`, same data, timed on my machine:
+
+```
+random_page_cost=4.0:  Seq Scan (est. cost 10827) -> HashAggregate         162ms
+random_page_cost=1.1:  Index Only Scan (est. cost 9628) -> GroupAggregate   89ms   Heap Fetches: 0
+```
+
+At 4.0 the planner priced the index path above the sequential scan and chose
+the scan. At 1.1 the index path came in cheaper and won. Nothing about caching
+or I/O changed - only the constant the planner multiplies by.
+
+The index it started using, `ix_auth_attempts_username_password`, already
+stores rows sorted by the `GROUP BY` key. Postgres walks it in order and
+accumulates groups as it goes, instead of building a hash table of every
+group. `Heap Fetches: 0` means it never touched the table - every column it
+needed is in the index.
+
+That index, and the others built for these queries in named migrations, all
+showed `idx_scan = 0` in `pg_stat_user_indexes`. The honeypot maintained them
+on every insert - it ingests continuously - and never read from them. Planner
+constant determined they weren't worth using.
+
+## The other settings
+
+Other settings were also considered:
+
+| Setting | Result |
+|---|---|
+| `random_page_cost=1.1` | kept - the entire win |
+| `work_mem=8MB` (with `jit=off`, not separated) | **2.3x worse** on one endpoint |
+| `jit=off` | 3ms apart - noise |
+| `shared_buffers=256MB` | 1ms apart - noise |
+| `effective_cache_size=1GB` | no change |
+| `effective_io_concurrency=200` | never measured |
+| `maintenance_work_mem=64MB` | already the default |
+
+I had also added `effective_io_concurrency=200`, because I saw quite a bit
+of recommendations for machines with SSD drives. Not yet measured. Default
+for Postgres 16 is 1.
+
+The interesting one is `work_mem`. I had bundled it with `random_page_cost`
+and `jit=off` and measured the bundle, which looked like a solid improvement.
+
+Split apart - a query bench against the restored snapshot, after the
+`/stats/countries` change in the next section, so `countries` starts at 185ms
+here rather than 810:
+
+```
+query bench, local.  countries = /stats/countries
+                     detail = /stats/countries/<a2>   creds = top-credentials
+
+stock (rpc=4, jit=on, wm=4MB)    countries=185ms detail=432ms  creds=131ms
+rpc=1.1 ONLY (jit=on, wm=4MB)    countries=185ms detail=438ms  creds= 63ms
+rpc=1.1 + jit=off + wm=8MB       countries=180ms detail=1000ms creds= 62ms
+```
+
+The credentials win is entirely `random_page_cost`. The country-detail
+endpoint more than doubles once `work_mem=8MB` and `jit=off` are added.
+`jit=off` on its own was noise, so `work_mem` is the suspect - though I
+measured the two together, so at the moment I can't pin it with certainty.
+
+The bundled measurement hid it. The two endpoints move in opposite directions
+and I was only watching the one that improved. I would have shipped that - it
+passed the tests and the linters.
+
+## `/stats/countries`
+
+Separately, `/stats/countries` was taking 810ms. The plan showed where:
+
+```
+GroupAggregate  (actual time=387.137..745.857 rows=126)
+  Group Key: COALESCE(geo_locations.country_code, '??')
+  ->  GroupAggregate  (rows=236985)
+        Group Key: COALESCE(geo_locations.country_code, '??'), auth_attempts.username, auth_attempts.password
+        ...
+        Sort Method: external merge  Disk: 4984kB
+```
+
+Nearly all of it was the inner aggregate. It grouped every auth attempt by
+`(country, username, password)` into 236,985 groups, spilling to disk on the
+way, and only then collapsed those into 126 countries. The inner stage existed
+to compute two output columns: `distinct_usernames` and `distinct_passwords`.
+
+Grepping the dashboard for either field hits the generated types and one test
+fixture. No component renders them. The Credentials page does show "Distinct
+passwords" and "Distinct usernames" tiles, but those come from
+`auth-outcomes`, a different endpoint entirely.
+
+Removing them collapses a two-stage aggregation into a single `GROUP BY
+country_code`:
+
+```
+query alone, psql, local:
+  with distinct user/pass counts   589ms
+  without                          150ms
+```
+
+End to end the endpoint went from 810ms to 203ms.
+
+## Cache-Control on errors
+
+The API sets `Cache-Control` per endpoint through a small `@after_this_request`
+block. There, I moved the Credentials endpoints from the 30-second default to
+120. The ingestor never stops writing, and the dashboard doesn't need sub-minute
+freshness.
+
+There is also an app-wide handler in `api/src/security_headers.py`:
+
+```python
+if request.path.endswith("/openapi.json") or response.status_code >= 400:
+    response.headers.setdefault("Cache-Control", "no-store")
+else:
+    response.headers.setdefault("Cache-Control", "public, max-age=30")
+```
+
+The `status_code >= 400` branch ensures that errors won't be cached. It uses
+`setdefault`. The per-endpoint blocks used plain assignment, and Flask runs
+`after_this_request` callbacks *before* app-level `after_request` handlers.
+So the endpoint's header was already in place, `setdefault` did nothing, and the
+`no-store` never happened.
+
+An error response carried `public, max-age=120`. I never saw it in production,
+but it's reachable. With the service monkeypatched to raise:
+
+```
+500-path status       : 500
+500-path Cache-Control: 'public, max-age=120'
+```
+
+nginx sits in front of the API and caches what it returns, takes that header at
+its word. During testing, a throwaway nginx config was pointed at a fake upstream
+that always answers 500 with `max-age=120`, with an `X-Cache` debug header
+added so the cache state is visible (production doesn't emit one):
+
+```
+req1: status=500  X-Cache=MISS
+req2: status=500  X-Cache=HIT
+req3: status=500  X-Cache=HIT
+```
+
+The first request stored the error; the next two were served from the cache
+without touching the API. That is shared by every viewer, so a single
+database blip would turn into two minutes of 500s for everyone, including
+people who open the page after the database has recovered.
+
+Six endpoints worked this way, and five of them had the bug. The sixth,
+`/stats/countries/<a2>` (`a2` being the ISO country code), was fine by
+accident: its `abort(404)` comes before the callback is registered, so on the
+error path there is no callback to run. Same bug, saved by statement order.
+
+As a fix - helper was added that sets the header on success:
+
+```python
+def _cache_for(seconds: int) -> None:
+    @after_this_request
+    def _set(response: Response) -> Response:
+        if response.status_code < 400:
+            response.headers["Cache-Control"] = f"public, max-age={seconds}"
+        return response
+```
+
+## nginx `inactive`
+
+The nginx cache zone was declared like this:
+
+```nginx
+# ... a 10s cache collapses that to at most one upstream query per endpoint
+# per interval, regardless of viewer count.
+proxy_cache_path /var/cache/nginx/api keys_zone=api_cache:4m max_size=32m inactive=60s;
+...
+proxy_cache_valid 200 10s;
+```
+
+The comment describes a 10s micro-cache. nginx honours the upstream
+`Cache-Control` unless `proxy_ignore_headers` tells it not to, and nothing here
+does. So the real TTL is whatever the endpoint sends - 30 to 300 seconds, not
+10. Verified against a fake upstream sending `max-age=120` while `proxy_cache_valid`
+said 10s:
+
+```
+1st:       X-Cache: MISS
+after 15s: X-Cache: HIT
+```
+
+The upstream header wins.
+
+`inactive=60s` is a *different clock* from freshness. Freshness decides whether
+a cached copy may be served. `inactive` decides whether the file is kept at
+all, and it resets on every read. Whichever fires first wins.
+
+The Origins page re-fetches `/stats/countries` every 120 seconds, and that
+endpoint sends `max-age=120`:
+
+```
+t=0     poll -> MISS -> fetch, store (fresh until t=120)
+t=60    nginx DELETES it - untouched for 60s, despite 60s of validity left
+t=120   poll -> MISS again
+```
+
+Every poll missed. The cache did nothing for a steady viewer, and had done
+nothing since I moved those endpoints to `max-age=120` a few days earlier.
+Before that they sent 30 seconds and `inactive=60s` outlived it by accident.
+Shrinking `inactive` to 5s against an entry with `max-age=120` shows the
+eviction:
+
+```
+1st:            X-Cache: MISS
+immediate:      X-Cache: HIT
+after 9s idle:  X-Cache: MISS   <- still valid, evicted anyway
+```
+
+Raising `inactive` past the longest `max-age` costs nothing. The entries are at
+most 24 KB and `max_size=32m` still bounds the total. It's `10m` now, which is
+nginx's own default; the `60s` had been an explicit shortening.
+
+## Dashboard poll interval
+
+Once the Credentials endpoints moved to `max-age=120` in the same change, the
+page's own constant was stale. It has a few views - the code calls them
+lenses - and the fast ones still had:
+
+```ts
+// Fast lenses (matrix rows/cols/pairs): 30s (matches endpoint Cache-Control);
+const POLL_MS = 30_000
+```
+
+The comment was true right up to that commit. Left as it was, the browser's
+own HTTP cache would have answered the 30-second poll - the generated API
+client sets no `cache` option on its fetches. Three polls in four would never
+reach the server. The effective refresh would be 120s, with no in-app way to
+force one short of a hard reload.
+
+Collapsed it to a single `POLL_MS = 120_000` matching the cache; the two
+slower lenses moved from 60s to 120s with it.
+
+## Resolution
+
+Through the API, locally, against the restored snapshot:
+
+```
+/stats/countries              810ms  -> 203ms   (distinct fields removed)
+Origins, 4 requests serial     1.5s  -> 0.41s   (same change)
+top-credentials               133ms  ->  65ms   (random_page_cost)
+password-composition          111ms  ->  77ms   (random_page_cost)
+/stats/countries/<a2>         426ms  -> 462ms   (+8%, accepted)
+```
+
+The country-detail drawer got slightly slower with `random_page_cost=1.1` -
+a real regression, kept because Credentials was the page pinning the CPU.
+
+On production, the API box had sat at around 60-80% CPU whenever Origins loaded.
+After the first change it mostly stayed under 50%, with occasional spikes to
+70%, and after the second deploy the map stays under 40% even on a fresh load.
+I did not re-measure the Origins page load time there yet. The Credentials page
+was the other heavy consumer, so the CPU drop is not only the Origins change.
+
+Those numbers are also softer than the local ones. There was no node exporter on
+the box at the time; I was reading `btop` while clicking through the dashboard,
+which is an eye test, not a measurement. The box has one now, so the next round
+gets compared on scraped CPU over time rather than on what I happened to notice.
+
+What's left is `ssh_clients`, about three quarters of the database:
+
+```
+ssh_clients           786 MB   ~74% of the database, zero dead tuples
+  rows                582,737
+  avg row             1414 B
+  hassh_algorithms    453 B avg, 149 distinct values
+after normalising    ~300 MB
+```
+
+Five of its six algorithm columns account for nearly all of it, and
+`hassh_algorithms` - the SSH client fingerprint's algorithm list - is the
+widest. The same few lists are stored hundreds of thousands of times.
+Normalising them into a lookup table would let the whole database sit in page
+cache instead of just the hot part. It needs a migration - not yet
+done.`pg_stat_statements` is now running on production, so when I come back to
+it the slow queries will be in a table rather than reconstructed from a snapshot.
+
+S.D.G

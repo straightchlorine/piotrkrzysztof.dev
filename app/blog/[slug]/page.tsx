@@ -30,8 +30,9 @@ export async function generateMetadata({ params }: Props): Promise<Metadata> {
     alternates: { canonical: url },
     openGraph: {
       type: "article",
+      siteName: "Piotr Krzysztof",
       url,
-      title: post.title,
+      title: `${post.title} | Piotr Krzysztof`,
       description: post.description,
       publishedTime: new Date(post.date).toISOString(),
       authors: ["Piotr Krzysztof Lis"],
@@ -44,6 +45,14 @@ export default async function BlogPost({ params }: Props) {
   const post = getBlogPost(slug);
   if (!post) notFound();
 
+  const sameAs = [
+    "https://github.com/straightchlorine",
+    "https://codeberg.org/piotrkrzysztof",
+    "https://pypi.org/user/straightchlorine",
+    "https://hub.docker.com/u/straightchlorine",
+    "https://www.linkedin.com/in/straightchlorine",
+  ];
+
   const jsonLd = {
     "@context": "https://schema.org",
     "@type": "BlogPosting",
@@ -53,10 +62,17 @@ export default async function BlogPost({ params }: Props) {
     dateModified: new Date(post.date).toISOString(),
     author: {
       "@type": "Person",
+      "@id": "https://piotrkrzysztof.dev/#piotr",
       name: "Piotr Krzysztof Lis",
       url: "https://piotrkrzysztof.dev",
+      sameAs,
     },
-    publisher: { "@type": "Person", name: "Piotr Krzysztof Lis" },
+    publisher: {
+      "@type": "Person",
+      "@id": "https://piotrkrzysztof.dev/#piotr",
+      name: "Piotr Krzysztof Lis",
+      sameAs,
+    },
     mainEntityOfPage: `https://piotrkrzysztof.dev/blog/${slug}`,
     url: `https://piotrkrzysztof.dev/blog/${slug}`,
     image: `https://piotrkrzysztof.dev/blog/${slug}/opengraph-image`,

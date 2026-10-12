@@ -4,7 +4,7 @@
 
 Personal site. Built with Next.js, deployed on Vercel.
 
-Source: [Codeberg](https://codeberg.org/piotrkrzysztof/piotrkrzysztof.dev) &middot; Mirror: [GitHub](https://github.com/piotrkrzysztof/piotrkrzysztof.dev)
+Source: [Codeberg](https://codeberg.org/piotrkrzysztof/piotrkrzysztof.dev) &middot; Mirror: [GitHub](https://github.com/straightchlorine/piotrkrzysztof.dev)
 
 ## Development
 
@@ -12,3 +12,5 @@ Source: [Codeberg](https://codeberg.org/piotrkrzysztof/piotrkrzysztof.dev) &midd
 pnpm install
 pnpm dev
 ```
+
+To the only God, be honour and glory for ever and ever.

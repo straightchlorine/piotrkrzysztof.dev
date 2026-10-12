@@ -2,14 +2,20 @@ import Link from "next/link";
 import type { Metadata } from "next";
 import { Nav } from "@/components/nav";
 import { getCaseStudies } from "@/lib/content";
+import { docs } from "@/lib/docs";
 
 export const metadata: Metadata = {
+  title: { absolute: "Piotr Krzysztof Lis - Software, Written Deliberately" },
+  description:
+    "Selected work and project documentation by Piotr Krzysztof: Quantum Pipeline, Honeywatch, colorgen, FSGA, an async data collector and Machine Learning in F1.",
   alternates: { canonical: "/" },
+  openGraph: { type: "website", siteName: "Piotr Krzysztof", url: "/" },
 };
 
 const personLd = {
   "@context": "https://schema.org",
   "@type": "Person",
+  "@id": "https://piotrkrzysztof.dev/#piotr",
   name: "Piotr Krzysztof Lis",
   alternateName: "Piotr Krzysztof",
   url: "https://piotrkrzysztof.dev",
@@ -54,6 +60,21 @@ export default function Home() {
       ) : (
         <p className="text-brown-muted mb-16">Coming soon.</p>
       )}
+
+      <h2 className="text-2xl font-semibold mb-6">Project documentation</h2>
+      <ul className="mb-16 space-y-1">
+        {docs.map(([name, href, blurb]) => (
+          <li key={href}>
+            <a
+              href={href}
+              className="text-brown-link underline decoration-brown-link/30 hover:decoration-brown-link transition-colors text-lg"
+            >
+              {name}
+            </a>
+            <span className="text-brown-muted"> - {blurb}</span>
+          </li>
+        ))}
+      </ul>
 
       <hr className="border-divider mb-8" />
 

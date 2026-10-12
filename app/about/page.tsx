@@ -3,9 +3,17 @@ import { Breadcrumb } from "@/components/nav";
 import type { Metadata } from "next";
 
 export const metadata: Metadata = {
-  title: "About",
-  description: "About Piotr Krzysztof.",
+  title: "About Piotr: Software and Open Source",
+  description:
+    "I write software and try to do it carefully. I also maintain a few open-source projects, mostly to study things I do not understand well yet. Email, GitHub.",
   alternates: { canonical: "/about" },
+  openGraph: {
+    type: "website",
+    siteName: "Piotr Krzysztof",
+    url: "/about",
+    images: ["/opengraph-image"],
+  },
+  twitter: { card: "summary_large_image", images: ["/opengraph-image"] },
 };
 
 export default function About() {

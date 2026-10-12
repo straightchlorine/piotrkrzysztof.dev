@@ -4,9 +4,17 @@ import { getCaseStudies } from "@/lib/content";
 import type { Metadata } from "next";
 
 export const metadata: Metadata = {
-  title: "Work",
-  description: "Selected open-source projects and case studies.",
+  title: "Work: Open-Source Projects and Write-ups",
+  description:
+    "Open-source projects, each with a write-up: what the project does, how it is put together and what building it taught.",
   alternates: { canonical: "/work" },
+  openGraph: {
+    type: "website",
+    siteName: "Piotr Krzysztof",
+    url: "/work",
+    images: ["/opengraph-image"],
+  },
+  twitter: { card: "summary_large_image", images: ["/opengraph-image"] },
 };
 
 export default function WorkIndex() {

@@ -27,8 +27,9 @@ export async function generateMetadata({ params }: Props): Promise<Metadata> {
     alternates: { canonical: url },
     openGraph: {
       type: "website",
+      siteName: "Piotr Krzysztof",
       url,
-      title: study.title,
+      title: `${study.title} | Piotr Krzysztof`,
       description: study.description,
     },
   };

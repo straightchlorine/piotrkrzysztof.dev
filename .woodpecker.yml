@@ -2,8 +2,8 @@ when:
   - event: push
 
 steps:
-  # Gate: runs on every branch (incl. master). Woodpecker runs steps
-  # sequentially, so a failure here stops the pipeline before any deploy.
+  # Gate: runs on every branch (incl. master).
+  # Failure here stops the pipeline before any deploy.
   - name: check
     image: node:22-alpine
     commands:
@@ -45,5 +45,15 @@ steps:
         from_secret: vercel_org_id
       VERCEL_PROJECT_ID:
         from_secret: vercel_project_id
+    when:
+      - branch: master
+
+  - name: indexnow
+    image: alpine:3
+    commands:
+      - apk add --no-cache curl
+      - sleep 30
+      - sh scripts/indexnow.sh
+    failure: ignore
     when:
       - branch: master

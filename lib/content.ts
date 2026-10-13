@@ -8,6 +8,7 @@ export interface BlogPost {
   slug: string;
   title: string;
   date: string;
+  updated?: string;
   description: string;
   content: string;
 }
@@ -15,6 +16,7 @@ export interface BlogPost {
 export interface CaseStudy {
   slug: string;
   title: string;
+  updated?: string;
   description: string;
   content: string;
 }
@@ -23,6 +25,10 @@ function readMdxFile(filePath: string) {
   const raw = fs.readFileSync(filePath, "utf-8");
   const { data, content } = matter(raw);
   return { data, content };
+}
+
+function toOptionalDate(value: unknown): string | undefined {
+  return value ? toDateString(value) : undefined;
 }
 
 function toDateString(value: unknown): string {
@@ -44,6 +50,7 @@ export function getBlogPosts(): BlogPost[] {
         slug: file.replace(/\.mdx$/, ""),
         title: data.title,
         date: toDateString(data.date),
+        updated: toOptionalDate(data.updated),
         description: data.description,
         content,
       };
@@ -59,6 +66,7 @@ export function getBlogPost(slug: string): BlogPost | undefined {
     slug,
     title: data.title,
     date: toDateString(data.date),
+    updated: toOptionalDate(data.updated),
     description: data.description,
     content,
   };
@@ -73,6 +81,7 @@ export function getCaseStudies(): CaseStudy[] {
     return {
       slug: file.replace(/\.mdx$/, ""),
       title: data.title,
+      updated: toOptionalDate(data.updated),
       description: data.description,
       content,
     };
@@ -86,6 +95,7 @@ export function getCaseStudy(slug: string): CaseStudy | undefined {
   return {
     slug,
     title: data.title,
+    updated: toOptionalDate(data.updated),
     description: data.description,
     content,
   };
